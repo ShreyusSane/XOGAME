@@ -1,0 +1,27 @@
+Result under optimal play: Alice wins
+Game length: 20 moves
+Move sequence: XXOOXXOOOXXXXXXXXOOX
+
+Move-by-move (turn: char):
+    1 Alice: X
+    2   Bob: X
+    3 Alice: O
+    4   Bob: O
+    5 Alice: X
+    6   Bob: X
+    7 Alice: O
+    8   Bob: O
+    9 Alice: O
+   10   Bob: X
+   11 Alice: X
+   12   Bob: X
+   13 Alice: X
+   14   Bob: X
+   15 Alice: X
+   16   Bob: X
+   17 Alice: X
+   18   Bob: O
+   19 Alice: O
+   20   Bob: X
+
+States explored (memo size): 3192848
