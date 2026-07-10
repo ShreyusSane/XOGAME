@@ -1,4 +1,13 @@
-import { MAX_BLOCK_LEN, MAX_COUNT, CLASSIC_RULES, type Player, type RuleConfig } from "../game/engine";
+import {
+  MAX_BLOCK_LEN,
+  MAX_COUNT,
+  DEFAULT_MAX_STATES,
+  MIN_MAX_STATES,
+  MAX_STATES_HARD_CAP,
+  CLASSIC_RULES,
+  type Player,
+  type RuleConfig,
+} from "../game/engine";
 
 interface Props {
   status: "idle" | "loading" | "ready" | "error";
@@ -6,6 +15,8 @@ interface Props {
   config: RuleConfig;
   onConfigChange: (config: RuleConfig) => void;
   onStart: (side: Player) => void;
+  progress: number;
+  maxStates: number;
 }
 
 function NumberField({
@@ -38,14 +49,21 @@ function NumberField({
   );
 }
 
-export default function SetupScreen({ status, error, config, onConfigChange, onStart }: Props) {
+export default function SetupScreen({ status, error, config, onConfigChange, onStart, progress, maxStates }: Props) {
   const isClassic =
     config.aliceCount === CLASSIC_RULES.aliceCount &&
     config.aliceLen === CLASSIC_RULES.aliceLen &&
     config.bobCount === CLASSIC_RULES.bobCount &&
-    config.bobLen === CLASSIC_RULES.bobLen;
+    config.bobLen === CLASSIC_RULES.bobLen &&
+    (config.maxStates ?? DEFAULT_MAX_STATES) === DEFAULT_MAX_STATES;
 
   const busy = status === "loading";
+  const maxStatesValue = config.maxStates ?? DEFAULT_MAX_STATES;
+  // While loading, the worker may have clamped/reported a slightly
+  // different effective cap than what was requested -- prefer that once we
+  // have it.
+  const effectiveMax = busy && maxStates > 0 ? maxStates : maxStatesValue;
+  const progressPct = effectiveMax > 0 ? Math.min(100, (progress / effectiveMax) * 100) : 0;
 
   return (
     <div className="setup">
@@ -107,6 +125,23 @@ export default function SetupScreen({ status, error, config, onConfigChange, onS
           </div>
         </div>
 
+        <div className="rule-card rule-limit">
+          <h3>Search limit</h3>
+          <p>
+            The solver gives up gracefully (instead of hanging or crashing the tab) once it's explored this many
+            distinct positions.
+          </p>
+          <div className="rule-inputs">
+            <NumberField
+              label="max positions"
+              value={maxStatesValue}
+              min={MIN_MAX_STATES}
+              max={MAX_STATES_HARD_CAP}
+              onChange={(v) => onConfigChange({ ...config, maxStates: v })}
+            />
+          </div>
+        </div>
+
         <div className="setup-rule-actions">
           <button className="link-btn" disabled={isClassic} onClick={() => onConfigChange(CLASSIC_RULES)}>
             Reset to classic (A=2, n=5, B=4, m=3)
@@ -136,10 +171,18 @@ export default function SetupScreen({ status, error, config, onConfigChange, onS
           </div>
 
           {status === "loading" && (
-            <p className="setup-status" role="status">
-              <span className="spinner" aria-hidden="true" />
-              Solving the full game tree for this ruleset&hellip;
-            </p>
+            <div className="setup-status" role="status">
+              <p>
+                <span className="spinner" aria-hidden="true" />
+                Solving the full game tree for this ruleset&hellip;
+              </p>
+              <div className="progress-bar">
+                <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
+              </div>
+              <p className="progress-count">
+                {progress.toLocaleString()} / {effectiveMax.toLocaleString()} positions explored
+              </p>
+            </div>
           )}
           {status === "error" && (
             <p className="setup-status setup-error" role="alert">

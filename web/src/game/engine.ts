@@ -22,6 +22,10 @@ export interface RuleConfig {
   aliceCount: number;
   bobLen: number;
   bobCount: number;
+  /** Cap on how many positions (memo entries) the solver will explore
+   * before giving up gracefully. Defaults to DEFAULT_MAX_STATES if
+   * omitted; always clamped to [MIN_MAX_STATES, MAX_STATES_HARD_CAP]. */
+  maxStates?: number;
 }
 
 export const CLASSIC_RULES: RuleConfig = { aliceLen: 5, aliceCount: 2, bobLen: 3, bobCount: 4 };
@@ -34,8 +38,19 @@ export const CLASSIC_RULES: RuleConfig = { aliceLen: 5, aliceCount: 2, bobLen: 3
 // MAX_STATES for bounding worst-case memory, not just search time.
 export const MAX_BLOCK_LEN = 10; // 2^10 = 1024 possible patterns per side
 export const MAX_COUNT = 8;
-const MAX_STATES = 4_500_000; // the classic ruleset alone needs ~3.19M
+export const DEFAULT_MAX_STATES = 4_500_000; // the classic ruleset alone needs ~3.19M
+export const MIN_MAX_STATES = 10_000;
+export const MAX_STATES_HARD_CAP = 10_000_000; // absolute ceiling regardless of what the UI asks for
 const MAX_MOVE_LENGTH = 1000;
+
+// How often (in newly-memoized positions) the worker is told how far along
+// the search is. Small enough to feel live, large enough that posting the
+// message itself isn't a meaningful chunk of the work.
+const PROGRESS_INTERVAL = 25_000;
+let progressCallback: ((count: number) => void) | null = null;
+export function setProgressCallback(cb: ((count: number) => void) | null) {
+  progressCallback = cb;
+}
 
 export type Player = "A" | "B";
 export type Result = "A" | "B" | "Draw" | null;
@@ -48,7 +63,7 @@ export class TooComplexError extends Error {
 }
 
 function validate(cfg: RuleConfig) {
-  const { aliceLen, aliceCount, bobLen, bobCount } = cfg;
+  const { aliceLen, aliceCount, bobLen, bobCount, maxStates } = cfg;
   if (![aliceLen, aliceCount, bobLen, bobCount].every((v) => Number.isInteger(v) && v >= 1)) {
     throw new TooComplexError("All of A, n, B, m must be positive integers.");
   }
@@ -58,11 +73,15 @@ function validate(cfg: RuleConfig) {
   if (aliceCount > MAX_COUNT || bobCount > MAX_COUNT) {
     throw new TooComplexError(`Block count can't exceed ${MAX_COUNT} (this blows up combinatorially).`);
   }
+  if (maxStates !== undefined && !Number.isInteger(maxStates)) {
+    throw new TooComplexError("Max positions must be an integer.");
+  }
 }
 
 // --- mutable packed state, (re)allocated by configure() -------------------
 
 let cfg: RuleConfig = CLASSIC_RULES;
+let maxStatesLimit = DEFAULT_MAX_STATES;
 let tailBits = 0;
 let tailLen = 0;
 let length = 0;
@@ -80,6 +99,10 @@ let memo = new Map<string, Outcome>();
 export function configure(newCfg: RuleConfig) {
   validate(newCfg);
   cfg = newCfg;
+  maxStatesLimit = Math.min(
+    MAX_STATES_HARD_CAP,
+    Math.max(MIN_MAX_STATES, newCfg.maxStates ?? DEFAULT_MAX_STATES),
+  );
   const tailBitsWidth = Math.max(cfg.aliceLen, cfg.bobLen) - 1;
   tailMask = tailBitsWidth === 0 ? 0 : (1 << tailBitsWidth) - 1;
   claimsACount = new Int32Array(1 << cfg.aliceLen);
@@ -281,9 +304,9 @@ function solve(turn: Player): Outcome {
   const cached = memo.get(key);
   if (cached) return cached;
 
-  if (memo.size > MAX_STATES) {
+  if (memo.size > maxStatesLimit) {
     throw new TooComplexError(
-      `This ruleset needs more than ${MAX_STATES.toLocaleString()} positions to solve -- too large for the browser. Try smaller numbers.`,
+      `This ruleset needs more than ${maxStatesLimit.toLocaleString()} positions to solve -- raise the max positions limit, or try smaller numbers.`,
     );
   }
 
@@ -311,6 +334,9 @@ function solve(turn: Player): Outcome {
 
   const outcome: Outcome = [bestVal![0], bestVal![1], bestMove];
   memo.set(key, outcome);
+  if (progressCallback && memo.size % PROGRESS_INTERVAL === 0) {
+    progressCallback(memo.size);
+  }
   return outcome;
 }
 
@@ -410,4 +436,8 @@ export function memoSize(): number {
 
 export function currentConfig(): RuleConfig {
   return cfg;
+}
+
+export function currentMaxStates(): number {
+  return maxStatesLimit;
 }

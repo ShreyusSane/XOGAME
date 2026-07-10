@@ -7,6 +7,11 @@ interface EngineState {
   root: Evaluation | null;
   memoSize: number;
   timeMs: number;
+  /** Positions explored so far -- ticks up live while status is "loading",
+   * equals memoSize once "ready". */
+  progress: number;
+  /** The effective cap on positions explored, for this configuration. */
+  maxStates: number;
   error?: string;
 }
 
@@ -14,6 +19,8 @@ export interface ChildrenResult {
   turn: Player;
   children: ChildEvaluation[];
 }
+
+const initialState: EngineState = { status: "idle", root: null, memoSize: 0, timeMs: 0, progress: 0, maxStates: 0 };
 
 /** Talks to the solver Web Worker. Call configure(rules) to (re)solve the
  * whole game for a given ruleset -- the worker does one expensive full-game
@@ -23,7 +30,7 @@ export function useEngine() {
   const workerRef = useRef<Worker | null>(null);
   const nextId = useRef(1);
   const pending = useRef(new Map<number, (msg: WorkerResponse) => void>());
-  const [state, setState] = useState<EngineState>({ status: "idle", root: null, memoSize: 0, timeMs: 0 });
+  const [state, setState] = useState<EngineState>(initialState);
 
   useEffect(() => {
     const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -37,7 +44,16 @@ export function useEngine() {
         resolve(msg);
       }
       if (msg.type === "ready") {
-        setState({ status: "ready", root: msg.root, memoSize: msg.memoSize, timeMs: msg.timeMs });
+        setState({
+          status: "ready",
+          root: msg.root,
+          memoSize: msg.memoSize,
+          timeMs: msg.timeMs,
+          progress: msg.memoSize,
+          maxStates: msg.maxStates,
+        });
+      } else if (msg.type === "progress") {
+        setState((s) => ({ ...s, progress: msg.count, maxStates: msg.maxStates }));
       } else if (msg.type === "error") {
         setState((s) => ({ ...s, status: "error", error: msg.message }));
       }
@@ -59,16 +75,13 @@ export function useEngine() {
     });
   }, []);
 
-  const configure = useCallback(
-    (config: RuleConfig) => {
-      setState({ status: "loading", root: null, memoSize: 0, timeMs: 0 });
-      const id = nextId.current++;
-      pending.current.set(id, () => {});
-      const req: WorkerRequest = { id, type: "configure", config };
-      workerRef.current?.postMessage(req);
-    },
-    [],
-  );
+  const configure = useCallback((config: RuleConfig) => {
+    setState({ ...initialState, status: "loading" });
+    const id = nextId.current++;
+    pending.current.set(id, () => {});
+    const req: WorkerRequest = { id, type: "configure", config };
+    workerRef.current?.postMessage(req);
+  }, []);
 
   const evaluate = useCallback(
     async (moves: string): Promise<Evaluation> => {

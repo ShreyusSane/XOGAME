@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { useEngine } from "./game/useEngine";
 import { simulate, winningBlocks, turnOf } from "./game/rules";
-import { CLASSIC_RULES, type Player, type ChildEvaluation, type Result, type RuleConfig } from "./game/engine";
+import {
+  CLASSIC_RULES,
+  DEFAULT_MAX_STATES,
+  type Player,
+  type ChildEvaluation,
+  type Result,
+  type RuleConfig,
+} from "./game/engine";
 import SetupScreen from "./components/SetupScreen";
 import EvaluationBanner from "./components/EvaluationBanner";
 import Board from "./components/Board";
@@ -12,7 +19,13 @@ import GameTree from "./components/GameTree";
 type Phase = "setup" | "playing";
 
 function sameConfig(a: RuleConfig, b: RuleConfig): boolean {
-  return a.aliceLen === b.aliceLen && a.aliceCount === b.aliceCount && a.bobLen === b.bobLen && a.bobCount === b.bobCount;
+  return (
+    a.aliceLen === b.aliceLen &&
+    a.aliceCount === b.aliceCount &&
+    a.bobLen === b.bobLen &&
+    a.bobCount === b.bobCount &&
+    (a.maxStates ?? DEFAULT_MAX_STATES) === (b.maxStates ?? DEFAULT_MAX_STATES)
+  );
 }
 
 function App() {
@@ -157,6 +170,8 @@ function App() {
         config={rulesConfig}
         onConfigChange={setRulesConfig}
         onStart={startGame}
+        progress={engine.progress}
+        maxStates={engine.maxStates}
       />
     );
   }
@@ -179,7 +194,8 @@ function App() {
           </span>
           {engine.status === "ready" && (
             <span className="engine-meta">
-              solver: {engine.memoSize.toLocaleString()} positions &middot; {(engine.timeMs / 1000).toFixed(1)}s
+              solver: {engine.memoSize.toLocaleString()} / {engine.maxStates.toLocaleString()} positions covered
+              &middot; {(engine.timeMs / 1000).toFixed(1)}s
             </span>
           )}
           <button className="link-btn" onClick={rematch}>

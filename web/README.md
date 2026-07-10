@@ -10,7 +10,11 @@ node's forced outcome shown.
 The rules themselves are configurable from the setup screen: Alice's
 target (`A` disjoint blocks of length `n`) and Bob's (`B` disjoint blocks
 of length `m`) are plain number inputs, not just the classic A=2,n=5,B=4,m=3.
-Changing them re-solves that exact ruleset from scratch.
+Changing them re-solves that exact ruleset from scratch. The search's
+"max positions" cutoff is also a setup-screen input (defaults to 4.5M,
+clamped to [10K, 10M]), and the solve shows a live progress bar and
+`positions explored / max` counter while it runs, then the final
+`positions covered / max` in the in-game header once done.
 
 ## How it's built
 
@@ -44,13 +48,23 @@ Changing them re-solves that exact ruleset from scratch.
     `solve()` call (millions of times), so key *string length* directly
     drives GC pressure — encode it as compactly as possible
     (`String.fromCharCode` packing, not human-readable separators).
-  - `MAX_BLOCK_LEN`, `MAX_COUNT`, `MAX_STATES`, `MAX_MOVE_LENGTH` are hard
-    safety caps independent of whatever the UI enforces. Bigger rulesets
-    don't just need more *states* — the number of simultaneously-active
-    patterns (and so each key's size) can also grow with game length, so
-    `MAX_MOVE_LENGTH` matters as much as `MAX_STATES` for bounding
-    worst-case memory. `TooComplexError` is what a config that blows past
-    these surfaces as, all the way up to the UI, instead of hanging the tab.
+  - `MAX_BLOCK_LEN`, `MAX_COUNT`, `MAX_STATES_HARD_CAP`, `MAX_MOVE_LENGTH`
+    are hard safety caps independent of whatever the UI enforces.
+    `maxStates` (the "max positions" search cutoff) *is* user-configurable
+    per `RuleConfig` — but always clamped into
+    `[MIN_MAX_STATES, MAX_STATES_HARD_CAP]` in `configure()`, so a typo or
+    a reckless value can't crash the tab. Bigger rulesets don't just need
+    more *states* — the number of simultaneously-active patterns (and so
+    each key's size) can also grow with game length, so `MAX_MOVE_LENGTH`
+    matters as much as the states cap for bounding worst-case memory.
+    `TooComplexError` is what a config that blows past any of these
+    surfaces as, all the way up to the UI, instead of hanging the tab.
+  - `setProgressCallback()` lets the worker report `memo.size` back to the
+    main thread every `PROGRESS_INTERVAL` (25K) newly-memoized positions,
+    *during* the otherwise-blocking synchronous `solve()` call — that's
+    what drives the live progress bar. It's called from inside `solve()`
+    right after `memo.set()`, so counts are exact (no double-reporting from
+    nested calls observing a stale `memo.size` before it's actually grown).
 - **`src/game/worker.ts`** / **`useEngine.ts`** — a `configure(rules)`
   message (re)builds the engine's arrays and solves the whole game once in
   a Web Worker (so the UI thread never blocks), then answers further
@@ -66,8 +80,9 @@ Changing them re-solves that exact ruleset from scratch.
 npm install
 npm run dev                    # http://localhost:5173/XOGAME/
 npm run build                  # production build to dist/
-npx tsx scripts/benchmark.ts   # solves classic + a couple of custom rulesets, cross-checks against rules.ts
+npx tsx scripts/benchmark.ts     # solves classic + a couple of custom rulesets, cross-checks against rules.ts
 npx tsx scripts/safety-check.ts  # confirms invalid/oversized rulesets fail gracefully, not via OOM/hang
+npx tsx scripts/maxstates-check.ts  # confirms the maxStates override and progress callback both work
 ```
 
 ## Deployment

@@ -1,5 +1,15 @@
 /// <reference lib="webworker" />
-import { configure, solveFromStart, evaluate, evaluateChildren, memoSize, TooComplexError, type RuleConfig } from "./engine";
+import {
+  configure,
+  solveFromStart,
+  evaluate,
+  evaluateChildren,
+  memoSize,
+  currentMaxStates,
+  setProgressCallback,
+  TooComplexError,
+  type RuleConfig,
+} from "./engine";
 
 export type WorkerRequest =
   | { id: number; type: "configure"; config: RuleConfig }
@@ -7,7 +17,8 @@ export type WorkerRequest =
   | { id: number; type: "children"; moves: string };
 
 export type WorkerResponse =
-  | { id: number; type: "ready"; root: ReturnType<typeof solveFromStart>; memoSize: number; timeMs: number }
+  | { id: number; type: "ready"; root: ReturnType<typeof solveFromStart>; memoSize: number; timeMs: number; maxStates: number }
+  | { id: number; type: "progress"; count: number; maxStates: number }
   | { id: number; type: "evaluation"; result: ReturnType<typeof evaluate> }
   | { id: number; type: "children"; result: ReturnType<typeof evaluateChildren> }
   | { id: number; type: "error"; message: string };
@@ -19,10 +30,22 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
   try {
     if (msg.type === "configure") {
       const t0 = performance.now();
+      setProgressCallback((count) => {
+        const progress: WorkerResponse = { id: msg.id, type: "progress", count, maxStates: currentMaxStates() };
+        ctx.postMessage(progress);
+      });
       configure(msg.config);
       const root = solveFromStart();
+      setProgressCallback(null);
       const t1 = performance.now();
-      const res: WorkerResponse = { id: msg.id, type: "ready", root, memoSize: memoSize(), timeMs: t1 - t0 };
+      const res: WorkerResponse = {
+        id: msg.id,
+        type: "ready",
+        root,
+        memoSize: memoSize(),
+        timeMs: t1 - t0,
+        maxStates: currentMaxStates(),
+      };
       ctx.postMessage(res);
     } else if (msg.type === "evaluate") {
       const result = evaluate(msg.moves);
@@ -34,6 +57,7 @@ ctx.onmessage = (e: MessageEvent<WorkerRequest>) => {
       ctx.postMessage(res);
     }
   } catch (err) {
+    setProgressCallback(null);
     const message =
       err instanceof TooComplexError
         ? err.message

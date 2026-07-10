@@ -190,6 +190,30 @@
   border-color: var(--alice);
 }
 
+.rule-limit {
+  margin-top: 14px;
+  border-radius: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  text-align: left;
+}
+.rule-limit h3 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 6px;
+  color: var(--text-dim);
+}
+.rule-limit p {
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.rule-limit .rule-field input {
+  width: 110px;
+}
+
 .setup-rule-actions {
   margin-top: 14px;
   display: flex;
@@ -271,15 +295,41 @@
 
 .setup-status {
   margin-top: 18px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+.setup-status p {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: var(--text-dim);
-  font-size: 14px;
 }
 .setup-error {
   color: #dc2626;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.progress-bar {
+  margin-top: 10px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+.progress-bar-fill {
+  height: 100%;
+  background: var(--alice);
+  border-radius: 999px;
+  transition: width 0.15s ease;
+}
+.progress-count {
+  margin-top: 6px;
+  font-size: 12px;
+  font-family: var(--mono);
+  color: var(--text-dim);
 }
 
 /* ---------- app shell ---------- */
