@@ -94,7 +94,33 @@ let claimsBEnd!: Int32Array;
 let activeA: number[] = [];
 let activeB: number[] = [];
 
-let memo = new Map<string, Outcome>();
+// A single JS Map can't actually hold MAX_STATES_HARD_CAP entries: V8 (and
+// other engines) impose a hard per-Map limit -- historically ~2^24 (~16.7M)
+// -- that throws "Map maximum size exceeded" (a RangeError) on insert once
+// hit, regardless of how much memory is actually available. That's an
+// engine limit, not a memory one, so raising maxStates alone doesn't help
+// past it. The fix is to shard: route each key to one of many Maps by hash,
+// so the *total* entry count can scale well past any single Map's ceiling
+// while each individual shard stays far below it. SHARD_COUNT=64 keeps each
+// shard's worst-case share of MAX_STATES_HARD_CAP (100M / 64 ≈ 1.6M) an
+// order of magnitude under the per-Map limit even in the worst case.
+const SHARD_COUNT = 64;
+let shards: Map<string, Outcome>[] = [];
+let memoCount = 0;
+
+function hashKey(key: string): number {
+  // FNV-1a -- fast, decent distribution, all we need for shard routing.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) {
+    h ^= key.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function shardFor(key: string): Map<string, Outcome> {
+  return shards[hashKey(key) % SHARD_COUNT];
+}
 
 export function configure(newCfg: RuleConfig) {
   validate(newCfg);
@@ -111,7 +137,8 @@ export function configure(newCfg: RuleConfig) {
   claimsBEnd = new Int32Array(1 << cfg.bobLen);
   activeA = [];
   activeB = [];
-  memo = new Map();
+  shards = Array.from({ length: SHARD_COUNT }, () => new Map());
+  memoCount = 0;
   reset();
 }
 
@@ -301,10 +328,11 @@ function better(turn: Player, a: readonly [Result, number], b: readonly [Result,
 
 function solve(turn: Player): Outcome {
   const key = buildKey(turn);
-  const cached = memo.get(key);
+  const shard = shardFor(key);
+  const cached = shard.get(key);
   if (cached) return cached;
 
-  if (memo.size > maxStatesLimit) {
+  if (memoCount > maxStatesLimit) {
     throw new TooComplexError(
       `This ruleset needs more than ${maxStatesLimit.toLocaleString()} positions to solve -- raise the max positions limit, or try smaller numbers.`,
     );
@@ -333,9 +361,10 @@ function solve(turn: Player): Outcome {
   }
 
   const outcome: Outcome = [bestVal![0], bestVal![1], bestMove];
-  memo.set(key, outcome);
-  if (progressCallback && memo.size % PROGRESS_INTERVAL === 0) {
-    progressCallback(memo.size);
+  shard.set(key, outcome);
+  memoCount++;
+  if (progressCallback && memoCount % PROGRESS_INTERVAL === 0) {
+    progressCallback(memoCount);
   }
   return outcome;
 }
@@ -431,7 +460,7 @@ export function evaluateChildren(moves: string): { turn: Player; children: Child
 }
 
 export function memoSize(): number {
-  return memo.size;
+  return memoCount;
 }
 
 export function currentConfig(): RuleConfig {
