@@ -40,7 +40,7 @@ export const MAX_BLOCK_LEN = 10; // 2^10 = 1024 possible patterns per side
 export const MAX_COUNT = 8;
 export const DEFAULT_MAX_STATES = 4_500_000; // the classic ruleset alone needs ~3.19M
 export const MIN_MAX_STATES = 10_000;
-export const MAX_STATES_HARD_CAP = 10_000_000; // absolute ceiling regardless of what the UI asks for
+export const MAX_STATES_HARD_CAP = 100_000_000; // absolute ceiling regardless of what the UI asks for
 const MAX_MOVE_LENGTH = 1000;
 
 // How often (in newly-memoized positions) the worker is told how far along
