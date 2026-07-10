@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 import { useEngine } from "./game/useEngine";
 import { simulate, winningBlocks, turnOf } from "./game/rules";
-import type { Player, ChildEvaluation, Result } from "./game/engine";
+import { CLASSIC_RULES, type Player, type ChildEvaluation, type Result, type RuleConfig } from "./game/engine";
 import SetupScreen from "./components/SetupScreen";
 import EvaluationBanner from "./components/EvaluationBanner";
 import Board from "./components/Board";
@@ -11,10 +11,15 @@ import GameTree from "./components/GameTree";
 
 type Phase = "setup" | "playing";
 
+function sameConfig(a: RuleConfig, b: RuleConfig): boolean {
+  return a.aliceLen === b.aliceLen && a.aliceCount === b.aliceCount && a.bobLen === b.bobLen && a.bobCount === b.bobCount;
+}
+
 function App() {
   const engine = useEngine();
   const [phase, setPhase] = useState<Phase>("setup");
   const [humanSide, setHumanSide] = useState<Player>("A");
+  const [rulesConfig, setRulesConfig] = useState<RuleConfig>(CLASSIC_RULES);
   const [moves, setMoves] = useState("");
   const [evaluation, setEvaluation] = useState<{ result: Result; movesRemaining: number } | null>(null);
   const [hints, setHints] = useState<ChildEvaluation[] | null>(null);
@@ -23,14 +28,17 @@ function App() {
   const [treeAtStart, setTreeAtStart] = useState(true);
   const [previewMoves, setPreviewMoves] = useState<string | null>(null);
 
-  const sim = simulate(moves);
+  const configuredFor = useRef<RuleConfig | null>(null);
+  const pendingSide = useRef<Player | null>(null);
+
+  const sim = simulate(moves, rulesConfig);
   const isOver = sim.winner !== null;
   const currentTurn = turnOf(moves.length + 1);
   const isHumanTurn = !isOver && currentTurn === humanSide;
 
   const lastRequestedMoves = useRef<string | null>(null);
 
-  const startGame = useCallback((side: Player) => {
+  const beginPlaying = useCallback((side: Player) => {
     setHumanSide(side);
     setMoves("");
     setEvaluation(null);
@@ -39,6 +47,31 @@ function App() {
     setTreeAtStart(true);
     setPhase("playing");
   }, []);
+
+  const startGame = useCallback(
+    (side: Player) => {
+      pendingSide.current = side;
+      if (configuredFor.current && sameConfig(configuredFor.current, rulesConfig) && engine.status === "ready") {
+        beginPlaying(side);
+        pendingSide.current = null;
+      } else {
+        configuredFor.current = rulesConfig;
+        engine.configure(rulesConfig);
+      }
+    },
+    [rulesConfig, engine, beginPlaying],
+  );
+
+  // Once a pending "start" request's solve completes, actually enter the game.
+  useEffect(() => {
+    if (pendingSide.current && engine.status === "ready") {
+      beginPlaying(pendingSide.current);
+      pendingSide.current = null;
+    }
+    if (engine.status === "error") {
+      pendingSide.current = null;
+    }
+  }, [engine.status, beginPlaying]);
 
   const playMove = useCallback((ch: "X" | "O") => {
     setMoves((m) => m + ch);
@@ -100,7 +133,7 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moves, phase, engine.status, isOver, currentTurn, humanSide]);
 
-  const winBlocks = isOver ? winningBlocks(moves) : null;
+  const winBlocks = isOver ? winningBlocks(moves, rulesConfig) : null;
 
   const resetToSetup = () => {
     setPhase("setup");
@@ -117,7 +150,15 @@ function App() {
   };
 
   if (phase === "setup") {
-    return <SetupScreen status={engine.status} error={engine.error} onStart={startGame} />;
+    return (
+      <SetupScreen
+        status={pendingSide.current ? engine.status : engine.status === "error" ? "error" : "idle"}
+        error={engine.error}
+        config={rulesConfig}
+        onConfigChange={setRulesConfig}
+        onStart={startGame}
+      />
+    );
   }
 
   const treeRoot = treeAtStart ? "" : moves;
@@ -132,6 +173,10 @@ function App() {
           <span className={`side-chip side-chip-${humanSide === "A" ? "alice" : "bob"}`}>
             You are {humanSide === "A" ? "Alice" : "Bob"}
           </span>
+          <span className="engine-meta">
+            rules: A={rulesConfig.aliceCount}&times;{rulesConfig.aliceLen}, B={rulesConfig.bobCount}&times;
+            {rulesConfig.bobLen}
+          </span>
           {engine.status === "ready" && (
             <span className="engine-meta">
               solver: {engine.memoSize.toLocaleString()} positions &middot; {(engine.timeMs / 1000).toFixed(1)}s
@@ -141,7 +186,7 @@ function App() {
             Rematch
           </button>
           <button className="link-btn" onClick={resetToSetup}>
-            Change side
+            Change side / rules
           </button>
         </div>
       </header>
@@ -213,7 +258,7 @@ function App() {
                   Close
                 </button>
               </div>
-              <Board moves={previewMoves} highlightRanges={winningBlocks(previewMoves)?.ranges ?? []} />
+              <Board moves={previewMoves} highlightRanges={winningBlocks(previewMoves, rulesConfig)?.ranges ?? []} />
             </div>
           )}
 

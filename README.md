@@ -4,6 +4,11 @@
 version where you can play against the solved bot as either Alice or Bob,
 see the exact number of moves to a forced win/draw update live, and browse
 the full game tree to study any line (not just the one actually played).
+The rules are also fully customizable in the app: instead of the classic
+2-disjoint-5-blocks / 4-disjoint-3-blocks, you can set Alice's target to
+any `A` disjoint blocks of length `n` and Bob's to any `B` disjoint blocks
+of length `m`, and it re-solves that exact ruleset from scratch in the
+browser.
 
 The repo has two parts:
 

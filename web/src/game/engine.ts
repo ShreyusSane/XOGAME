@@ -1,140 +1,263 @@
-// Fast packed-state game-tree engine. This is the performance-critical twin
-// of ../../../solver.py: same rules, same minimax preference order (win
-// fastest / draw with an arbitrary-but-deterministic fastest tie-break /
-// prolong a forced loss as long as possible), but using flat typed arrays
-// and in-place mutate+undo recursion instead of Python's dict copying, and
-// storing claims as absolute end-positions (capped only when building the
-// memo key) instead of maintaining rolling gaps -- so there is no per-move
-// O(pattern count) sweep.
+// Fast packed-state game-tree engine, generalized to arbitrary rules:
+// Alice wins on `aliceCount` disjoint identical length-`aliceLen` blocks,
+// Bob wins on `bobCount` disjoint identical length-`bobLen` blocks. The
+// classic game is aliceLen=5, aliceCount=2, bobLen=3, bobCount=4.
+//
+// This is the performance-critical twin of ../../../solver.py: same rules,
+// same minimax preference order (win fastest / draw with an
+// arbitrary-but-deterministic fastest tie-break / prolong a forced loss as
+// long as possible), but using flat typed arrays and in-place mutate+undo
+// recursion instead of Python's dict copying, and storing claims as
+// absolute end-positions (capped only when building the memo key) instead
+// of maintaining rolling gaps -- so there is no per-move O(pattern count)
+// sweep. Only *active* (claimed at least once) patterns are ever iterated,
+// via a small stack per side, so memo-key construction stays cheap even
+// when the pattern space (2^len) is large.
 //
 // Characters are represented as 0 ('X') / 1 ('O') throughout for speed;
 // convert at the API boundary only.
 
-const ALICE_LEN = 5;
-const BOB_LEN = 3;
-const BOB_COUNT = 4;
-const TAIL_MASK = 0b1111;
+export interface RuleConfig {
+  aliceLen: number;
+  aliceCount: number;
+  bobLen: number;
+  bobCount: number;
+}
+
+export const CLASSIC_RULES: RuleConfig = { aliceLen: 5, aliceCount: 2, bobLen: 3, bobCount: 4 };
+
+// Hard safety caps, independent of whatever the UI enforces -- protects
+// against a pattern space (2^len) or a memo blowup large enough to hang or
+// crash the tab. These aren't just about total state *count*: the number
+// of simultaneously-active patterns (and so each memo key's size) can grow
+// with the game length too, so MAX_MOVE_LENGTH matters as much as
+// MAX_STATES for bounding worst-case memory, not just search time.
+export const MAX_BLOCK_LEN = 10; // 2^10 = 1024 possible patterns per side
+export const MAX_COUNT = 8;
+const MAX_STATES = 4_500_000; // the classic ruleset alone needs ~3.19M
+const MAX_MOVE_LENGTH = 1000;
 
 export type Player = "A" | "B";
 export type Result = "A" | "B" | "Draw" | null;
 
-// --- mutable packed state -------------------------------------------------
+export class TooComplexError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "TooComplexError";
+  }
+}
 
+function validate(cfg: RuleConfig) {
+  const { aliceLen, aliceCount, bobLen, bobCount } = cfg;
+  if (![aliceLen, aliceCount, bobLen, bobCount].every((v) => Number.isInteger(v) && v >= 1)) {
+    throw new TooComplexError("All of A, n, B, m must be positive integers.");
+  }
+  if (aliceLen > MAX_BLOCK_LEN || bobLen > MAX_BLOCK_LEN) {
+    throw new TooComplexError(`Block length can't exceed ${MAX_BLOCK_LEN} (browser memory safety limit).`);
+  }
+  if (aliceCount > MAX_COUNT || bobCount > MAX_COUNT) {
+    throw new TooComplexError(`Block count can't exceed ${MAX_COUNT} (this blows up combinatorially).`);
+  }
+}
+
+// --- mutable packed state, (re)allocated by configure() -------------------
+
+let cfg: RuleConfig = CLASSIC_RULES;
 let tailBits = 0;
 let tailLen = 0;
 let length = 0;
-const claims5 = new Int16Array(32).fill(-1); // pattern(5 bits) -> end pos, -1 absent
-const claims3Count = new Int8Array(8); // pattern(3 bits) -> count (0 = absent)
-const claims3End = new Int16Array(8);
+let tailMask = 0;
+
+let claimsACount!: Int32Array;
+let claimsAEnd!: Int32Array;
+let claimsBCount!: Int32Array;
+let claimsBEnd!: Int32Array;
+let activeA: number[] = [];
+let activeB: number[] = [];
+
+let memo = new Map<string, Outcome>();
+
+export function configure(newCfg: RuleConfig) {
+  validate(newCfg);
+  cfg = newCfg;
+  const tailBitsWidth = Math.max(cfg.aliceLen, cfg.bobLen) - 1;
+  tailMask = tailBitsWidth === 0 ? 0 : (1 << tailBitsWidth) - 1;
+  claimsACount = new Int32Array(1 << cfg.aliceLen);
+  claimsAEnd = new Int32Array(1 << cfg.aliceLen);
+  claimsBCount = new Int32Array(1 << cfg.bobLen);
+  claimsBEnd = new Int32Array(1 << cfg.bobLen);
+  activeA = [];
+  activeB = [];
+  memo = new Map();
+  reset();
+}
 
 function reset() {
   tailBits = 0;
   tailLen = 0;
   length = 0;
-  claims5.fill(-1);
-  claims3Count.fill(0);
-  claims3End.fill(0);
+  for (const i of activeA) {
+    claimsACount[i] = 0;
+    claimsAEnd[i] = 0;
+  }
+  for (const i of activeB) {
+    claimsBCount[i] = 0;
+    claimsBEnd[i] = 0;
+  }
+  activeA = [];
+  activeB = [];
 }
 
 interface Undo {
   prevTailBits: number;
   prevTailLen: number;
-  idx5: number;
-  prev5: number;
-  idx3: number;
-  prevCount3: number;
-  prevEnd3: number;
+  idxA: number;
+  prevCountA: number;
+  prevEndA: number;
+  newlyActiveA: boolean;
+  idxB: number;
+  prevCountB: number;
+  prevEndB: number;
+  newlyActiveB: boolean;
+}
+
+// activeA/activeB are kept sorted by pattern index at all times (insertion
+// on push, removal by value on pop) so buildKey() can iterate them directly
+// without allocating/sorting a copy on every single solve() call -- that
+// used to run millions of times and was the dominant source of GC pressure
+// (it worked, but ran the browser out of memory on the classic ruleset).
+// These arrays are always small (bounded by moves played so far along the
+// current path), so the O(n) insert/remove here is cheap.
+function insertSorted(arr: number[], v: number) {
+  let i = arr.length;
+  arr.push(v);
+  while (i > 0 && arr[i - 1] > v) {
+    arr[i] = arr[i - 1];
+    i--;
+  }
+  arr[i] = v;
+}
+
+function removeValue(arr: number[], v: number) {
+  arr.splice(arr.indexOf(v), 1);
 }
 
 function applyMove(c: 0 | 1): { result: Result; undo: Undo } {
   const prevTailBits = tailBits;
   const prevTailLen = tailLen;
   const newLength = length + 1;
-  let alice = false;
-  let bob = false;
-  let idx5 = -1;
-  let prev5 = -1;
-  let idx3 = -1;
-  let prevCount3 = 0;
-  let prevEnd3 = 0;
+  let aliceWin = false;
+  let bobWin = false;
+  let idxA = -1;
+  let prevCountA = 0;
+  let prevEndA = 0;
+  let newlyActiveA = false;
+  let idxB = -1;
+  let prevCountB = 0;
+  let prevEndB = 0;
+  let newlyActiveB = false;
 
-  if (newLength >= ALICE_LEN) {
-    const w5 = ((tailBits & 0b1111) << 1) | c;
-    const start = newLength - ALICE_LEN + 1;
-    const prevEnd = claims5[w5];
+  if (newLength >= cfg.aliceLen) {
+    const kBits = cfg.aliceLen - 1;
+    const mask = kBits === 0 ? 0 : (1 << kBits) - 1;
+    const w = ((tailBits & mask) << 1) | c;
+    const start = newLength - cfg.aliceLen + 1;
+    const cnt = claimsACount[w];
+    const prevEnd = claimsAEnd[w];
     if (start > prevEnd) {
-      idx5 = w5;
-      prev5 = prevEnd;
-      if (prevEnd !== -1) alice = true;
-      claims5[w5] = newLength;
-    }
-  }
-
-  if (newLength >= BOB_LEN) {
-    const w3 = ((tailBits & 0b11) << 1) | c;
-    const start = newLength - BOB_LEN + 1;
-    const cnt = claims3Count[w3];
-    const prevEnd = claims3End[w3];
-    if (start > prevEnd) {
-      idx3 = w3;
-      prevCount3 = cnt;
-      prevEnd3 = prevEnd;
+      idxA = w;
+      prevCountA = cnt;
+      prevEndA = prevEnd;
+      newlyActiveA = cnt === 0;
       const newCnt = cnt + 1;
-      claims3Count[w3] = newCnt;
-      claims3End[w3] = newLength;
-      if (newCnt >= BOB_COUNT) bob = true;
+      claimsACount[w] = newCnt;
+      claimsAEnd[w] = newLength;
+      if (newlyActiveA) insertSorted(activeA, w);
+      if (newCnt >= cfg.aliceCount) aliceWin = true;
     }
   }
 
-  tailBits = ((tailBits << 1) | c) & TAIL_MASK;
-  tailLen = Math.min(tailLen + 1, 4);
+  if (newLength >= cfg.bobLen) {
+    const kBits = cfg.bobLen - 1;
+    const mask = kBits === 0 ? 0 : (1 << kBits) - 1;
+    const w = ((tailBits & mask) << 1) | c;
+    const start = newLength - cfg.bobLen + 1;
+    const cnt = claimsBCount[w];
+    const prevEnd = claimsBEnd[w];
+    if (start > prevEnd) {
+      idxB = w;
+      prevCountB = cnt;
+      prevEndB = prevEnd;
+      newlyActiveB = cnt === 0;
+      const newCnt = cnt + 1;
+      claimsBCount[w] = newCnt;
+      claimsBEnd[w] = newLength;
+      if (newlyActiveB) insertSorted(activeB, w);
+      if (newCnt >= cfg.bobCount) bobWin = true;
+    }
+  }
+
+  tailBits = ((tailBits << 1) | c) & tailMask;
+  tailLen = Math.min(tailLen + 1, Math.max(cfg.aliceLen, cfg.bobLen) - 1);
   length = newLength;
 
   let result: Result = null;
-  if (alice && bob) result = "Draw";
-  else if (alice) result = "A";
-  else if (bob) result = "B";
+  if (aliceWin && bobWin) result = "Draw";
+  else if (aliceWin) result = "A";
+  else if (bobWin) result = "B";
 
-  return { result, undo: { prevTailBits, prevTailLen, idx5, prev5, idx3, prevCount3, prevEnd3 } };
+  if (result === null && length > MAX_MOVE_LENGTH) {
+    throw new TooComplexError(
+      `Game exceeded ${MAX_MOVE_LENGTH} moves without resolving -- this ruleset is too large to solve in the browser.`,
+    );
+  }
+
+  return {
+    result,
+    undo: { prevTailBits, prevTailLen, idxA, prevCountA, prevEndA, newlyActiveA, idxB, prevCountB, prevEndB, newlyActiveB },
+  };
 }
 
 function undoMove(u: Undo) {
   length -= 1;
   tailBits = u.prevTailBits;
   tailLen = u.prevTailLen;
-  if (u.idx5 !== -1) claims5[u.idx5] = u.prev5;
-  if (u.idx3 !== -1) {
-    claims3Count[u.idx3] = u.prevCount3;
-    claims3End[u.idx3] = u.prevEnd3;
+  if (u.idxA !== -1) {
+    claimsACount[u.idxA] = u.prevCountA;
+    claimsAEnd[u.idxA] = u.prevEndA;
+    if (u.newlyActiveA) removeValue(activeA, u.idxA);
+  }
+  if (u.idxB !== -1) {
+    claimsBCount[u.idxB] = u.prevCountB;
+    claimsBEnd[u.idxB] = u.prevEndB;
+    if (u.newlyActiveB) removeValue(activeB, u.idxB);
   }
 }
 
+// activeA/activeB are maintained in sorted-by-pattern-index order (see
+// insertSorted/removeValue above), which is what makes the key canonical
+// regardless of which move order led to this state -- two different
+// histories reaching the same underlying position must produce the same
+// key so they share one memo entry.
 function buildKey(turn: Player): string {
-  let c5 = "";
-  for (let p = 0; p < 32; p++) {
-    const end = claims5[p];
-    if (end !== -1) {
-      const gap = Math.min(length - end, ALICE_LEN - 1);
-      c5 += p.toString(36) + gap;
-    }
+  let a = "";
+  for (const p of activeA) {
+    const gap = Math.min(length - claimsAEnd[p], cfg.aliceLen - 1);
+    const combo = claimsACount[p] * cfg.aliceLen + gap;
+    a += String.fromCharCode(p, combo);
   }
-  let c3 = "";
-  for (let p = 0; p < 8; p++) {
-    const cnt = claims3Count[p];
-    if (cnt !== 0) {
-      const end = claims3End[p];
-      const gap = Math.min(length - end, BOB_LEN - 1);
-      c3 += p.toString(36) + cnt + gap;
-    }
+  let b = "";
+  for (const p of activeB) {
+    const gap = Math.min(length - claimsBEnd[p], cfg.bobLen - 1);
+    const combo = claimsBCount[p] * cfg.bobLen + gap;
+    b += String.fromCharCode(p, combo);
   }
-  return tailBits + "." + tailLen + turn + "|" + c5 + "|" + c3;
+  return String.fromCharCode(tailBits, tailLen) + turn + a + "|" + b;
 }
 
 // --- minimax ---------------------------------------------------------------
 
 type Outcome = [Result, number, 0 | 1]; // result, moves remaining, best move
-
-const memo = new Map<string, Outcome>();
 
 function rank(turn: Player, result: Result): number {
   if (result === turn) return 2;
@@ -157,6 +280,12 @@ function solve(turn: Player): Outcome {
   const key = buildKey(turn);
   const cached = memo.get(key);
   if (cached) return cached;
+
+  if (memo.size > MAX_STATES) {
+    throw new TooComplexError(
+      `This ruleset needs more than ${MAX_STATES.toLocaleString()} positions to solve -- too large for the browser. Try smaller numbers.`,
+    );
+  }
 
   let bestVal: [Result, number] | null = null;
   let bestMove: 0 | 1 = 0;
@@ -206,9 +335,10 @@ export interface Evaluation {
   bestMove: "X" | "O";
 }
 
-/** Solve the whole game from the start. This is the expensive call (~a few
- * million memoized states); everything else is fast afterward since the
- * root-level search touches nearly every reachable state. */
+/** Solve the whole game from the start. This is the expensive call; the
+ * exact cost depends heavily on the configured rules. Everything else is
+ * fast afterward since the root-level search touches nearly every
+ * reachable state. */
 export function solveFromStart(): Evaluation {
   reset();
   const [result, movesRemaining, bestMove] = solve("A");
@@ -259,8 +389,6 @@ export function evaluateChildren(moves: string): { turn: Player; children: Child
   }
   reset();
 
-  // Mark the move(s) matching the current player's preference as optimal
-  // (there can be a tie only if both lead to identical (result,length)).
   let bestIdx = 0;
   for (let i = 1; i < results.length; i++) {
     if (better(turn, [results[i].result, results[i].movesRemaining], [results[bestIdx].result, results[bestIdx].movesRemaining])) {
@@ -278,4 +406,8 @@ export function evaluateChildren(moves: string): { turn: Player; children: Child
 
 export function memoSize(): number {
   return memo.size;
+}
+
+export function currentConfig(): RuleConfig {
+  return cfg;
 }
