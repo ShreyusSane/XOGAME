@@ -37,15 +37,6 @@ turns, Alice first. Each turn a player appends `X` or `O`.
 - If a single move makes both conditions become true for the first time
   in the same instant, it's a **draw**.
 
-This was a genuine ambiguity in the original prompt ("blocks ... that are
-identical" could mean "each block is internally uniform" or "the blocks
-match each other"); the interpretation above — blocks must match each
-other as arbitrary patterns, not necessarily a run of one letter — was
-confirmed directly with the requester. Bob's "4 identical blocks" is
-read as the direct extension of Alice's "2 identical blocks": all 4 must
-be the *same* pattern, not 4 blocks drawn from possibly different matching
-pairs.
-
 Both win conditions depend only on the string itself, not on who placed
 the deciding character — so a player can accidentally hand the *other*
 player a win on their own move. Both players play to win, then to draw
